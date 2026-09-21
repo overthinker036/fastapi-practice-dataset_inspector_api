@@ -20,7 +20,7 @@ async def lifespan(app: FastAPI):
 
 
 
-app = FastAPI(lifespan=lifespan)
+app = FastAPI(lifespan=lifespan, title="CSV Inspector API")
 
 
 
@@ -33,23 +33,31 @@ async def get_db_session():
 
 
 #Uploaded file processor function:
-async def process_uploaded_file(file, a_id: int):
+async def process_uploaded_file(a_id: int, filepath: str):
     async with AsyncSessionLocal() as db:
-        df = None
+        analysis = None
         try:
-            df = await asyncio.to_thread(pd.read_csv, file)
-            
-            #CSV analysis here:
-            n_cols = len(list(df.columns))
-            n_rows = len(df)
-            missing_rows_per_column = df.isna().sum()
-
             analysis = await db.get(database_models.Analysis, a_id)
 
             if analysis is None:
                 raise ValueError(f"Analysis {a_id} not found!")
 
-            analysis.status = "success"
+            analysis.status = "running"
+
+            await db.commit()
+
+            #Read CSV without blocking event loop:
+            df = await asyncio.to_thread(pd.read_csv, filepath)
+
+            #CSV analysis:
+            n_cols = len(list(df.columns))
+            n_rows = len(df)
+
+            missing_rows_per_column = df.isna().sum()
+
+            #Analysis succesfull:
+            analysis.status = "completed"
+
             analysis.result = {
                 "Columns": int(n_cols),
                 "Rows": int(n_rows),
@@ -57,10 +65,9 @@ async def process_uploaded_file(file, a_id: int):
                     col: int(count) for col, count in missing_rows_per_column.items()
                 }
             }
+
             analysis.error = None
-
             await db.commit()
-
         except Exception as e:
             await db.rollback()
 
@@ -70,10 +77,9 @@ async def process_uploaded_file(file, a_id: int):
                 analysis.status = "failed"
                 analysis.error = str(e)
                 await db.commit()
-            
+
             traceback.print_exc()
             
-
 
     
     
@@ -84,7 +90,7 @@ def welcome():
 
 
 
-@app.post("/analyses")
+@app.post("/analyses", status_code=202)
 async def user_posted_an_analysis(file: UploadFile, bgTask: BackgroundTasks, db: AsyncSession = Depends(get_db_session)):
     
     file_contents = await file.read()
@@ -117,9 +123,9 @@ async def user_posted_an_analysis(file: UploadFile, bgTask: BackgroundTasks, db:
     async with aiofiles.open(dest, "wb") as buffer:
         await buffer.write(file_contents)
     
-    bgTask.add_task(process_uploaded_file, io.BytesIO(file_contents), analysis.a_id)
-    return {"message": "File is being processed.",
-            "analysis": analysis}
+    bgTask.add_task(process_uploaded_file, analysis.a_id, dest)
+    return {"id": analysis.a_id,
+            "status": analysis.status}
     
 
 
@@ -129,6 +135,12 @@ async def user_wants_single_analysis(a_id: int, db: AsyncSession = Depends(get_d
 
     if analysis is None:
         raise HTTPException(404, f"Analysis {a_id} not found!")
+
+    if analysis.status in ("pending", "running"):
+        raise HTTPException(409, f"Analysis {a_id} is not completed yet!")
+    if analysis.status == "failed":
+        raise HTTPException(409, f"Analysis {a_id} failed: {analysis.error}")
+    
     return analysis
 
 
