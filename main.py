@@ -92,25 +92,14 @@ def welcome():
 
 @app.post("/analyses", status_code=202)
 async def user_posted_an_analysis(file: UploadFile, bgTask: BackgroundTasks, db: AsyncSession = Depends(get_db_session)):
-    
-    file_contents = await file.read()
-    size_mb = len(file_contents)/(1000**2)
-    f_type = file.filename.rsplit(".", 1)[-1].lower() if file.filename else ""
 
-    if size_mb > 2: raise HTTPException(413, "File too large!")
-    if size_mb <= 0: raise HTTPException(400, "File corrupted or empty!")
+    f_type = file.filename.rsplit(".", 1)[-1].lower() if file.filename else ""
     if f_type != "csv": raise HTTPException(415, "File is not a CSV!")
    
 
     #Analyze, save report and filepath to database and the file itself to a filestore
 
-    filename = file.filename
-    status = "pending"
-    result = None
-    error = None
-
-
-    analysis = database_models.Analysis(filename=filename, status=status, result=result, error=error)
+    analysis = database_models.Analysis(filename=file.filename, status="pending", result=None, error=None)
 
 
     db.add(analysis)
@@ -118,13 +107,29 @@ async def user_posted_an_analysis(file: UploadFile, bgTask: BackgroundTasks, db:
     await db.refresh(analysis)
 
     await aios.makedirs("uploads", exist_ok=True)
-    dest = os.path.join("uploads", f'{analysis.a_id}.csv')
+    dest = os.path.join("uploads", f"{analysis.a_id}.csv")
+
+    MAX_SIZE = 2*1024*1024
+    total_size = 0
 
     async with aiofiles.open(dest, "wb") as buffer:
-        await buffer.write(file_contents)
-    
+        while True:
+            chunk = await file.read(1024*1024)
+
+            if not chunk: break
+
+            total_size += len(chunk)
+
+            if total_size > MAX_SIZE:
+                raise HTTPException(413, "File too large!")
+            await buffer.write(chunk)
+
+        
+    if total_size == 0: raise HTTPException(400, "File corrupted or empty!")
+
     bgTask.add_task(process_uploaded_file, analysis.a_id, dest)
-    return {"id": analysis.a_id,
+    
+    return {"a_id": analysis.a_id,
             "status": analysis.status}
     
 
@@ -135,13 +140,11 @@ async def user_wants_single_analysis(a_id: int, db: AsyncSession = Depends(get_d
 
     if analysis is None:
         raise HTTPException(404, f"Analysis {a_id} not found!")
-
-    if analysis.status in ("pending", "running"):
-        raise HTTPException(409, f"Analysis {a_id} is not completed yet!")
-    if analysis.status == "failed":
-        raise HTTPException(409, f"Analysis {a_id} failed: {analysis.error}")
     
-    return analysis
+    return {
+        "a_id": analysis.a_id,
+        "status": analysis.status
+    }
 
 
 
@@ -152,14 +155,30 @@ async def user_wants_single_analysis_report(a_id: int, db: AsyncSession = Depend
 
     if analysis is None:
         raise HTTPException(404, f"Analysis {a_id} not found!")
-    if analysis.result is None:
-        raise HTTPException(404, f"Report for analysis {a_id} not found!")
-    return analysis.result
+    if analysis.status in ("pending", "running"):
+        raise HTTPException(409, f"Analysis {a_id} not ready yet!")
+    if analysis.status == "failed":
+        raise HTTPException(409, f"Analysis {a_id} failed: {analysis.error}")
+
+    return {
+        "a_id": analysis.a_id,
+        "report": analysis.result,
+        "status": analysis.status
+    }
 
 
 
 
 @app.get("/analyses")
-async def user_wants_all_analyses(db: AsyncSession = Depends(get_db_session)):
-    result = await db.execute(select(database_models.Analysis))
+async def user_wants_all_analyses(status: str | None = None, skip: int = 0, limit: int = 10, db: AsyncSession = Depends(get_db_session)):
+    query = select(database_models.Analysis)
+
+    if status is not None:
+        query = query.where(database_models.Analysis.status == status)
+
+    query = query.offset(skip).limit(limit)
+
+    result = await db.execute(query)
+
     return result.scalars().all()
+    
