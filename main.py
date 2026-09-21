@@ -1,7 +1,7 @@
 from fastapi import FastAPI, UploadFile, Depends, HTTPException, BackgroundTasks
 from database_conn import AsyncSessionLocal, engine
 from sqlalchemy.ext.asyncio import AsyncSession
-import database_models, io, traceback, asyncio, os, aiofiles
+import database_models, traceback, asyncio, os, aiofiles
 from contextlib import asynccontextmanager
 import pandas as pd
 from sqlalchemy import select
@@ -101,7 +101,6 @@ async def user_posted_an_analysis(file: UploadFile, bgTask: BackgroundTasks, db:
 
     analysis = database_models.Analysis(filename=file.filename, status="pending", result=None, error=None)
 
-
     db.add(analysis)
     await db.commit()
     await db.refresh(analysis)
@@ -121,14 +120,24 @@ async def user_posted_an_analysis(file: UploadFile, bgTask: BackgroundTasks, db:
             total_size += len(chunk)
 
             if total_size > MAX_SIZE:
-                raise HTTPException(413, "File too large!")
+                break
             await buffer.write(chunk)
 
         
-    if total_size == 0: raise HTTPException(400, "File corrupted or empty!")
+    if total_size == 0: 
+        if os.path.exists(dest): os.remove(dest)
+        await db.delete(analysis)
+        await db.commit()
+        raise HTTPException(400, "File corrupted or empty!")
+
+    if total_size > MAX_SIZE:
+        if os.path.exists(dest): os.remove(dest)
+        await db.delete(analysis)
+        await db.commit()
+        raise HTTPException(413, "File too large!")
 
     bgTask.add_task(process_uploaded_file, analysis.a_id, dest)
-    
+
     return {"a_id": analysis.a_id,
             "status": analysis.status}
     
