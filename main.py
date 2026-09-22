@@ -7,7 +7,7 @@ import pandas as pd
 from sqlalchemy import select
 from aiofiles import os as aios
 
-
+UPLOAD_DIR = "uploads"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -98,15 +98,14 @@ async def user_posted_an_analysis(file: UploadFile, bgTask: BackgroundTasks, db:
    
 
     #Analyze, save report and filepath to database and the file itself to a filestore
-
     analysis = database_models.Analysis(filename=file.filename, status="pending", result=None, error=None)
 
     db.add(analysis)
     await db.commit()
     await db.refresh(analysis)
 
-    await aios.makedirs("uploads", exist_ok=True)
-    dest = os.path.join("uploads", f"{analysis.a_id}.csv")
+    await aios.makedirs(UPLOAD_DIR, exist_ok=True)
+    dest = os.path.join(UPLOAD_DIR, f"{analysis.a_id}.csv")
 
     MAX_SIZE = 2*1024*1024
     total_size = 0
